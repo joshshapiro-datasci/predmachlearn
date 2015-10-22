@@ -1,0 +1,100 @@
+---
+title: 'Human Activity Recognition'
+output:
+  html_document:
+    keep_md: no
+---
+
+
+## Load packages and csvs with out data for analysis
+```{r,message=FALSE}
+library(parallel)
+library(caret)
+library(plyr)
+library(doSNOW)
+library(randomForest)
+library(RANN)
+
+if (!file.exists("pml-training.csv")) {
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-train.csv", "pml-train.csv")
+  download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", "pml-testing.csv")
+}
+```
+
+## Create primary dirty X
+```{r, cache=TRUE}
+defined <- read.csv("pml-training.csv", stringsAsFactors=FALSE)
+problem <- read.csv("pml-testing.csv", stringsAsFactors=FALSE)
+
+X <- list(defined=subset(defined, select=intersect(colnames(defined), colnames(problem))),
+          problem=subset(problem, select=intersect(colnames(defined), colnames(problem))))
+Y <- list(defined=as.factor(unlist(subset(defined, select="classe"))), 
+          problem=NULL)
+rm(list=c("defined", "problem"))
+```
+
+## Preprocess
+### Transform
+```{r, cache=TRUE}
+X <- lapply(X, function(xx) {
+  xx <- subset(xx, select=-c(X:cvtd_timestamp))
+  xx[xx=="#DIV/0!"] <- ""
+  xx[xx==""] <- NA
+  xx[xx=="no"] <- 0
+  xx[xx=="yes"] <- 1
+  
+  charColumns <- sapply(xx, is.character)
+  xx[charColumns] <- lapply(xx[charColumns], as.numeric)
+  return(xx)
+})
+
+X$defined <- X$defined[,colSums(is.na(X$defined)) < nrow(X$defined)] #remove columns with all NA
+X$problem <- X$problem[,intersect(colnames(X$defined), colnames(X$problem))]
+```
+
+### Select and create features based on poor variation of varibles and strong correlation indicating redudant variables
+```{r, cache=TRUE}
+numericColumns <- sapply(X$defined, is.numeric)
+nsv <- nearZeroVar(subset(X$defined, select=numericColumns), saveMetrics=TRUE)
+badVarNumericColumnNames <- rownames(subset(nsv, nzv))
+numericColumns[names(numericColumns) %in% badVarNumericColumnNames] <- FALSE
+
+correlationMatrix <- cor(subset(X$defined, select=numericColumns), use="complete.obs")
+highlyCorrelated <- findCorrelation(correlationMatrix, cutoff=0.7)
+numericColumns[numericColumns][highlyCorrelated] <- FALSE
+X <- lapply(X, function(xx) return(xx[,numericColumns]))
+```
+
+### For selected features apply standartization and imputing NAs
+```{r, cache=TRUE}
+preObj <- preProcess(X$defined, method=c("center","scale","knnImpute"))
+X <- lapply(X, function(xx) return(predict(preObj, xx)))
+```
+
+### Partition the data for train and test sets
+```{r, cache=TRUE}
+inTrain <- createDataPartition(y=Y$defined, p=0.8, list=FALSE)
+  
+X$train <- X$defined[inTrain,]; Y$train <- Y$defined[inTrain]
+X$test <- X$defined[-inTrain,]; Y$test <- Y$defined[-inTrain]
+X["defined"] <- NULL; Y["defined"] <- NULL
+```
+
+## Create model with random forest
+```{r, cache=TRUE}
+print(system.time(
+  model <- randomForest(classe ~ ., data=cbind(X$train, classe=Y$train), ntree=100, norm.votes=FALSE)
+))
+```
+
+## Define quality of result model
+```{r, cache=TRUE}
+modelQuality <- confusionMatrix(predict(model, newdata=X$test), Y$test)
+print(modelQuality)
+```
+
+## Predict classes for undefined part of data
+```{r, cache=TRUE}
+Y$problem <- predict(model, newdata=X$problem)
+print(Y$problem)
+```
